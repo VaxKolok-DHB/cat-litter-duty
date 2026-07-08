@@ -410,6 +410,57 @@
   }
   #toast.error{background:#d5537a;}
 
+  /* Sync card */
+  .sync-card{
+    background:linear-gradient(135deg, #fff7ec, #fdeefc);
+    border:2px dashed var(--peach);
+  }
+  .sync-status-row{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    flex-wrap:wrap;
+  }
+  .sync-dot{
+    width:10px;height:10px;
+    border-radius:50%;
+    background:#c8bdb0;
+    flex-shrink:0;
+  }
+  .sync-dot.on{background:var(--ok); box-shadow:0 0 0 4px rgba(87,196,138,0.18);}
+  .sync-dot.off{background:#d5537a; box-shadow:0 0 0 4px rgba(213,83,122,0.14);}
+  .sync-text{font-size:0.86rem; font-weight:600; flex:1;}
+  .sync-text .sub{display:block; font-weight:400; color:var(--sub); font-size:0.76rem; margin-top:1px;}
+  .sync-row{
+    display:flex;
+    gap:8px;
+    margin-top:12px;
+    flex-wrap:wrap;
+  }
+  .sync-row input{
+    flex:1;
+    min-width:160px;
+    padding:11px 14px;
+    border-radius:12px;
+    border:1.5px solid var(--line);
+    font-family:inherit;
+    font-size:16px;
+    outline:none;
+    min-height:44px;
+  }
+  .sync-row input:focus{border-color:var(--peach);}
+  .sync-note{
+    font-size:0.74rem;
+    color:var(--sub);
+    margin-top:10px;
+    line-height:1.5;
+  }
+
+  @media (max-width:640px){
+    .sync-row{flex-direction:column;}
+    .sync-row .btn{width:100%; justify-content:center;}
+  }
+
   @media (max-width:640px){
     h1{font-size:1.08rem;}
     .card{padding:16px;}
@@ -447,6 +498,20 @@
       <p>ใครเข้าเวรวันนี้เอ่ย~ มาช่วยกันดูแลกระบะทรายให้เหมียวมีความสุขกันเถอะ</p>
     </div>
   </header>
+
+  <!-- Sync -->
+  <section class="card sync-card" id="syncCard">
+    <div class="card-head">
+      <div class="icon-badge peach" style="font-size:1.15rem;">🔗</div>
+      <h2>ซิงค์ข้อมูลข้ามมือถือ</h2>
+    </div>
+    <div class="sync-status-row">
+      <span class="sync-dot" id="syncDot"></span>
+      <span class="sync-text" id="syncText">กำลังตรวจสอบ...</span>
+    </div>
+    <div id="syncActions"></div>
+    <div class="sync-note">ข้อมูลจะถูกส่งไปเก็บบนบริการฝากไฟล์ JSON ฟรีภายนอก (jsonblob.com) เพื่อให้ทุกอุปกรณ์ที่ใช้ลิงก์เดียวกันเห็นข้อมูลตรงกัน — ใครก็ตามที่มีลิงก์นี้จะดู/แก้ข้อมูลได้ จึงไม่ควรแชร์ลิงก์ออกไปนอกบ้าน</div>
+  </section>
 
   <!-- Today card -->
   <section class="card today-card" id="todayCard">
@@ -567,11 +632,13 @@
         console.warn("โหลดข้อมูลเดิมไม่สำเร็จ เริ่มต้นใหม่", e);
       }
     }
-    return { members:[], schedule:{}, logs:{}, nextId:1 };
+    return { members:[], schedule:{}, logs:{}, nextId:1, updatedAt:0 };
   }
 
   let saveErrorShown = false;
-  function saveState(){
+  // writes to this device's local storage only (no cloud push) — used right after
+  // pulling fresh data from the cloud so we don't immediately echo it back
+  function saveLocalOnly(){
     const payload = JSON.stringify(state);
     if(!hasStorage){
       memoryState = payload;
@@ -583,26 +650,253 @@
     }
     try{
       localStorage.setItem(STORE_KEY, payload);
-      showToast("✅ บันทึกแล้ว");
     }catch(e){
-      // e.g. storage full or private-mode quota — retry once, then warn
+      try{ localStorage.setItem(STORE_KEY, payload); }
+      catch(e2){ showToast("⚠️ บันทึกไม่สำเร็จ ลองอีกครั้งหรือเช็คพื้นที่เบราว์เซอร์", true); }
+    }
+  }
+  // full save: bumps the timestamp, writes locally, shows confirmation, and
+  // (if this device is synced to a room) pushes the change to the cloud
+  function saveState(){
+    state.updatedAt = Date.now();
+    const payload = JSON.stringify(state);
+    if(!hasStorage){
+      memoryState = payload;
+      if(!saveErrorShown){
+        showToast("⚠️ เบราว์เซอร์นี้บันทึกถาวรไม่ได้ ข้อมูลจะหายเมื่อปิดแท็บ", true);
+        saveErrorShown = true;
+      }
+    } else {
       try{
         localStorage.setItem(STORE_KEY, payload);
         showToast("✅ บันทึกแล้ว");
-      }catch(e2){
-        showToast("⚠️ บันทึกไม่สำเร็จ ลองอีกครั้งหรือเช็คพื้นที่เบราว์เซอร์", true);
+      }catch(e){
+        try{
+          localStorage.setItem(STORE_KEY, payload);
+          showToast("✅ บันทึกแล้ว");
+        }catch(e2){
+          showToast("⚠️ บันทึกไม่สำเร็จ ลองอีกครั้งหรือเช็คพื้นที่เบราว์เซอร์", true);
+        }
       }
     }
+    scheduleCloudPush();
   }
 
   // extra safety net: try to flush a save if the tab is closed/hidden mid-edit
-  window.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden") saveState(); });
-  window.addEventListener("pagehide", saveState);
+  window.addEventListener("visibilitychange", ()=>{
+    if(document.visibilityState==="hidden") saveLocalOnly();
+    if(document.visibilityState==="visible" && roomId) pullFromCloud(false);
+  });
+  window.addEventListener("pagehide", saveLocalOnly);
+  window.addEventListener("focus", ()=>{ if(roomId) pullFromCloud(false); });
 
   let state = loadState();
   // migrate defaults if empty
   if(state.members.length === 0 && !state.seeded){
     // leave empty on purpose; user adds their own household members
+  }
+  if(state.updatedAt == null) state.updatedAt = 0;
+
+  // ---------- Cloud sync (jsonblob.com — free, no signup) ----------
+  const CLOUD_API = "https://jsonblob.com/api/jsonBlob";
+  const ROOM_KEY = "catLitterDutyRoomId";
+  let roomId = null;
+  try{ roomId = localStorage.getItem(ROOM_KEY); }catch(e){}
+  try{
+    const params = new URLSearchParams(window.location.search);
+    const paramRoom = params.get("room");
+    if(paramRoom && paramRoom !== roomId){
+      roomId = paramRoom;
+      try{ localStorage.setItem(ROOM_KEY, roomId); }catch(e){}
+    }
+  }catch(e){}
+
+  let pushTimer = null;
+  let pollTimer = null;
+
+  function shareUrl(id){
+    const url = new URL(window.location.href);
+    url.hash = "";
+    url.search = "";
+    url.searchParams.set("room", id);
+    return url.toString();
+  }
+
+  function setSyncStatus(mode, text, subtext){
+    const dot = document.getElementById("syncDot");
+    const txt = document.getElementById("syncText");
+    if(!dot || !txt) return;
+    dot.className = "sync-dot" + (mode ? " "+mode : "");
+    txt.innerHTML = escapeHtml(text) + (subtext ? `<span class="sub">${escapeHtml(subtext)}</span>` : "");
+  }
+
+  function renderSyncActions(){
+    const box = document.getElementById("syncActions");
+    if(!box) return;
+    box.innerHTML = "";
+    if(!roomId){
+      const row1 = document.createElement("div");
+      row1.className = "sync-row";
+      const startBtn = document.createElement("button");
+      startBtn.className = "btn btn-outline";
+      startBtn.innerHTML = "🌐 เริ่มซิงค์กับอุปกรณ์อื่น";
+      startBtn.addEventListener("click", startNewRoom);
+      row1.appendChild(startBtn);
+      box.appendChild(row1);
+
+      const row2 = document.createElement("div");
+      row2.className = "sync-row";
+      const input = document.createElement("input");
+      input.placeholder = "มีลิงก์/รหัสห้องจากคนอื่น? วางตรงนี้";
+      const joinBtn = document.createElement("button");
+      joinBtn.className = "btn btn-outline";
+      joinBtn.innerHTML = "🔑 เข้าร่วม";
+      joinBtn.addEventListener("click", ()=>{
+        const val = input.value.trim();
+        if(!val) return;
+        let id = val;
+        try{
+          if(val.includes("room=")){
+            const u = new URL(val);
+            id = u.searchParams.get("room") || val;
+          }
+        }catch(e){}
+        joinRoom(id.trim());
+      });
+      row2.appendChild(input);
+      row2.appendChild(joinBtn);
+      box.appendChild(row2);
+    } else {
+      const row = document.createElement("div");
+      row.className = "sync-row";
+      const copyBtn = document.createElement("button");
+      copyBtn.className = "btn btn-outline";
+      copyBtn.innerHTML = "📋 คัดลอกลิงก์ชวนซิงค์";
+      copyBtn.addEventListener("click", async ()=>{
+        const link = shareUrl(roomId);
+        try{
+          await navigator.clipboard.writeText(link);
+          showToast("📋 คัดลอกลิงก์แล้ว ส่งให้คนในบ้านเปิดได้เลย");
+        }catch(e){
+          window.prompt("คัดลอกลิงก์นี้ไปแชร์:", link);
+        }
+      });
+      const leaveBtn = document.createElement("button");
+      leaveBtn.className = "btn btn-outline";
+      leaveBtn.innerHTML = "🔌 เลิกซิงค์";
+      leaveBtn.addEventListener("click", ()=>{
+        if(!window.confirm("เลิกซิงค์กับอุปกรณ์อื่น? เครื่องนี้จะกลับไปเก็บข้อมูลแยกในเครื่องเท่านั้น")) return;
+        roomId = null;
+        clearInterval(pollTimer);
+        try{ localStorage.removeItem(ROOM_KEY); }catch(e){}
+        setSyncStatus("off","ยังไม่ได้ซิงค์","ข้อมูลเก็บเฉพาะเครื่องนี้");
+        renderSyncActions();
+      });
+      row.appendChild(copyBtn);
+      row.appendChild(leaveBtn);
+      box.appendChild(row);
+    }
+  }
+
+  async function startNewRoom(){
+    setSyncStatus("", "กำลังเชื่อมต่อ...");
+    try{
+      state.updatedAt = Date.now();
+      const res = await fetch(CLOUD_API, {
+        method:"POST",
+        headers:{"Content-Type":"application/json","Accept":"application/json"},
+        body: JSON.stringify(state)
+      });
+      if(!res.ok) throw new Error("create failed: "+res.status);
+      const loc = res.headers.get("Location");
+      if(!loc) throw new Error("no-location-header");
+      const id = loc.split("/").filter(Boolean).pop();
+      roomId = id;
+      try{ localStorage.setItem(ROOM_KEY, roomId); }catch(e){}
+      setSyncStatus("on", "ซิงค์อยู่ ✅", "คัดลอกลิงก์ไปแชร์ให้คนในบ้านได้เลย");
+      renderSyncActions();
+      showToast("🌐 เชื่อมต่อสำเร็จ! คัดลอกลิงก์ไปแชร์ได้เลย");
+      startPolling();
+    }catch(e){
+      setSyncStatus("off", "เชื่อมต่อไม่สำเร็จ", "ลองใหม่อีกครั้ง หรือเช็คอินเทอร์เน็ต");
+      showToast("⚠️ เริ่มซิงค์ไม่สำเร็จ ลองใหม่อีกครั้งน้า", true);
+    }
+  }
+
+  async function joinRoom(id){
+    if(!id) return;
+    const prevRoom = roomId;
+    roomId = id;
+    setSyncStatus("", "กำลังดึงข้อมูลห้อง...");
+    const ok = await pullFromCloud(true);
+    if(ok){
+      try{ localStorage.setItem(ROOM_KEY, roomId); }catch(e){}
+      setSyncStatus("on", "ซิงค์อยู่ ✅", "เชื่อมกับห้องแล้ว");
+      showToast("🎉 เข้าร่วมซิงค์สำเร็จ!");
+      startPolling();
+    } else {
+      roomId = prevRoom;
+      setSyncStatus(roomId?"on":"off", roomId?"ซิงค์อยู่ ✅":"เข้าร่วมไม่สำเร็จ", roomId?"":"เช็ครหัส/ลิงก์อีกครั้ง");
+      showToast("⚠️ หารหัสห้องนี้ไม่เจอ ลองเช็คลิงก์อีกครั้ง", true);
+    }
+    renderSyncActions();
+  }
+
+  function scheduleCloudPush(){
+    if(!roomId) return;
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(pushToCloud, 900);
+  }
+
+  async function pushToCloud(){
+    if(!roomId) return;
+    try{
+      const res = await fetch(CLOUD_API + "/" + roomId, {
+        method:"PUT",
+        headers:{"Content-Type":"application/json","Accept":"application/json"},
+        body: JSON.stringify(state)
+      });
+      if(!res.ok) throw new Error("push failed "+res.status);
+      setSyncStatus("on", "ซิงค์อยู่ ✅", "อัปเดตล่าสุด "+new Date().toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit"}));
+    }catch(e){
+      setSyncStatus("off", "ซิงค์ไม่สำเร็จตอนนี้", "ข้อมูลยังบันทึกในเครื่องนี้ปกติ");
+    }
+  }
+
+  async function pullFromCloud(force){
+    if(!roomId) return false;
+    try{
+      const res = await fetch(CLOUD_API + "/" + roomId, { headers:{"Accept":"application/json"} });
+      if(!res.ok) throw new Error("pull failed "+res.status);
+      const remote = await res.json();
+      if(force || (remote && typeof remote.updatedAt === "number" && remote.updatedAt > (state.updatedAt||0))){
+        state = Object.assign({ members:[], schedule:{}, logs:{}, nextId:1, updatedAt:0 }, remote);
+        saveLocalOnly();
+        renderAll();
+      }
+      setSyncStatus("on", "ซิงค์อยู่ ✅", "อัปเดตล่าสุด "+new Date().toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit"}));
+      return true;
+    }catch(e){
+      setSyncStatus("off", "ดึงข้อมูลไม่สำเร็จ", "เช็คอินเทอร์เน็ตแล้วลองใหม่");
+      return false;
+    }
+  }
+
+  function startPolling(){
+    clearInterval(pollTimer);
+    pollTimer = setInterval(()=>pullFromCloud(false), 20000);
+  }
+
+  function initSync(){
+    renderSyncActions();
+    if(roomId){
+      setSyncStatus("", "กำลังเชื่อมต่อ...");
+      pullFromCloud(false).then(ok=>{
+        if(ok) startPolling();
+      });
+    } else {
+      setSyncStatus("off", "ยังไม่ได้ซิงค์", "ข้อมูลเก็บเฉพาะเครื่องนี้");
+    }
   }
 
   function todayKey(d){
@@ -937,6 +1231,7 @@
   }
 
   renderAll();
+  initSync();
 })();
 </script>
 </body>
